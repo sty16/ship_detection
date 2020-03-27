@@ -25,21 +25,11 @@ __global__ void  cuMatPad(cuMat a, cuMat res, int pad_row, int pad_col){
                 res.data[i][j] = a.data[pad_row - 1 -i][j-pad_col];
             }
             for(int j=pad_col+a.width;j<res.width;j++){
-                res.data[i][j] = a.data[pad_col-1-i][2*a.width+pad_col-1-j];
+                res.data[i][j] = a.data[pad_row - 1 - i][2*a.width+pad_col-1-j];
             }
-        }else if(i >= pad_row + a.height){
+        }else if(i < pad_row + a.height && i >= pad_row){
             for(int j = 0;j<pad_col;j++){
-                res.data[i][j] = a.data[2*a.height+pad_row-1-i][pad_col - 1 -j];
-            }
-            for(int j = pad_col;j<pad_col+a.width;j++){
-                res.data[i][j] = a.data[pad_row - 1 - i][j-pad_col];
-            }
-            for(int j=pad_col+a.width;j<res.width;j++){
-                res.data[i][j] = a.data[pad_row - 1 -i][2*a.width+pad_col-1-j];
-            }
-        }else{
-            for(int j = 0;j<pad_col;j++){
-                res.data[i][j] = a.data[i-pad_row]][pad_col - 1 -j];
+                res.data[i][j] = a.data[i-pad_row][pad_col - 1 -j];
             }
             for(int j = pad_col;j<pad_col+a.width;j++){
                 res.data[i][j] = a.data[i-pad_row][j-pad_col];
@@ -47,7 +37,17 @@ __global__ void  cuMatPad(cuMat a, cuMat res, int pad_row, int pad_col){
             for(int j=pad_col+a.width;j<res.width;j++){
                 res.data[i][j] = a.data[i-pad_row][2*a.width+pad_col-1-j];
             }
-        }
+        }else{
+            for(int j = 0;j<pad_col;j++){
+                res.data[i][j] = a.data[2*a.height+pad_row-1-i][pad_col - 1 -j];
+            }
+            for(int j = pad_col;j<pad_col+a.width;j++){
+                res.data[i][j] = a.data[2*a.height+pad_row-1-i][j-pad_col];
+            }
+            for(int j=pad_col+a.width;j<res.width;j++){
+                res.data[i][j] = a.data[2*a.height+pad_row-1-i][2*a.width+pad_col-1-j];
+            }
+       }
     }
 }
 
@@ -55,18 +55,32 @@ __device__ void InitMat(cuMat &mat, int h, int w){
     mat.height = h;
     mat.width = w;
     cudaMalloc((void**)&mat.data, sizeof(cuComplex *)*h);
-    for(int i=0;i<h;i++)
+    cudaMalloc((void**)&mat.meta_data, sizeof(cuComplex)*h*w);
+    for(int i=0;i<h;i++){
+        mat.data[i] = mat.meta_data + i*w;
+    }
+}
+
+__host__ void HostInitMat(cuMat &mat, int h, int w){
+    mat.height = h;
+    mat.width = w;
+    cudaMallocManaged((void**)&mat.data, sizeof(cuComplex *)*h);
+    cudaMallocPitch((void**)&mat.meta_data, &mat.pitch ,sizeof(cuComplex)*w, h);   //采用cudaMallocPitch分配2D数组加快访问
+    for(size_t i=0;i<h;i++)
     {
-        cudaMalloc((void**)&mat.data[i], sizeof(cuComplex)*w);
+        mat.data[i] =  (cuComplex *)((char *)mat.meta_data + i*mat.pitch);     //直接访问设备内存会报错，使用cudaMallocManaged
     }
     // Memory does not need to be initialized to ensure speed
 }
 
 __device__ void DestroyMat(cuMat &mat){
-    for(int i=0;i<mat.height;i++){
-        cudaFree(mat.data[i]);
-    }
     cudaFree(mat.data);
+    cudaFree(mat.meta_data);
+}
+
+__host__ void HostDestroyMat(cuMat &mat){
+    cudaFree(mat.data);
+    cudaFree(mat.meta_data);
 }
 
 __device__  cuMat  MulMat(cuMat a, cuMat b, cuComplex alpha){
@@ -85,11 +99,11 @@ __device__  cuMat  MulMat(cuMat a, cuMat b, cuComplex alpha){
    }
 }
 
-__device__ cuMat PadMat(cuMat a, int pad_row, int pad_col){
+__host__ cuMat HostPadMat(cuMat a, int pad_row, int pad_col){
     cuMat res;
-    InitMat(res, a.height + 2*pad_row, a.width + 2*pad_col);
+    HostInitMat(res, a.height + 2*pad_row, a.width + 2*pad_col);   // 主机调用, 分配设备内存
     dim3 blockdim(64);
-    dim3 griddim((int)(res.height+63)/64);    // copy by row
+    dim3 griddim((int)(res.height+63)/64);                         // pad by row
     cuMatPad<<<griddim,blockdim>>>(a, res, pad_row, pad_col);
     cudaDeviceSynchronize(); 
     return res;

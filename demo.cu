@@ -8,25 +8,12 @@
 #include<helper_functions.h>
 
 //global variable
-__device__ __managed__ cuMat img[3]; //device variable managed variable,to which Host is accessible
+__device__ __managed__ cuMat imgPad[3]; //device variable managed variable,to which Host is accessible
+__device__ __managed__ cuMat img[3];  // the matrix of the origin image
 
-
-__global__ void InitData(cuComplex *dev_data, int h, int w, int pad_row, int pad_col) 
+__global__ void PrintData() 
 {
-    int index = threadIdx.x;
-    __shared__ cuMat temp[3];
-    temp[index].height = h;
-    temp[index].width = w;
-    cudaMalloc((void**)&temp[index].data, sizeof(cuComplex *)*h);
-    for(int i=0;i<h;i++)
-    {
-        temp[index].data[i] = dev_data + (i+index*h)*w;   // find bug 1
-    }
-    img[index] = PadMat(temp[index], pad_row, pad_col);
-    // InitMat(img[index],1000,1000); 
-    __syncthreads();
-    printf("%f\n", img[index].data[14][14].x);
-    // cudaFree(temp[index].data);
+    printf("(%f,%f)\n", imgPad[0].data[1015][1015].x, imgPad[0].data[1015][1015].y);
 }
 
 __global__ void test() {
@@ -47,7 +34,7 @@ __global__ void test() {
     }
     C = MulMat(A, B, alpha);
     __syncthreads();
-    D = PadMat(A, 2, 2);
+    // D = PadMat(A, 2, 2);
     __syncthreads();
     DestroyMat(A);
     DestroyMat(B);
@@ -69,29 +56,16 @@ int main(){
     const char *matfile_VV = "./data/imagery_VV.mat";
     const char *param_VV = "imagery_VV";
     complex<float> *img_HH, *img_HV, *img_VV;
-    cuComplex *g_data;                           // complex data pointer on GPU device
     int h = 1000, w = 1000, N = 15;                               //size of the image data
     img_HH = matToArray(matfile_HH, param_HH);
     img_HV = matToArray(matfile_HV, param_HV);
     img_VV = matToArray(matfile_VV, param_VV);
-    checkCudaErrors(cudaMalloc((void**)&g_data, sizeof(cuComplex)*h*w*3)); // three channels
-    checkCudaErrors(cudaMemcpy(g_data, img_HH, sizeof(cuComplex)*h*w, cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(g_data + h*w, img_HV, sizeof(cuComplex)*h*w, cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(g_data + 2*h*w, img_VV, sizeof(cuComplex)*h*w, cudaMemcpyHostToDevice));
-    InitData<<<1,3>>>(g_data, h, w, N, N);
-    // // initial mat_HH, mat_HV, mat_VV
-    // checkCudaErrors(cudaMallocManaged((void**)&mat_HH.data, sizeof(cuComplex *)*h));
-    // checkCudaErrors(cudaMallocManaged((void**)&mat_HV.data, sizeof(cuComplex *)*h));
-    // checkCudaErrors(cudaMallocManaged((void**)&mat_VV.data, sizeof(cuComplex *)*h));  //Uniform memory addressing cudaMallocManaged
-    // mat_HH.height = h; mat_HH.width = w;
-    // mat_HV.height = h, mat_HV.width = w;
-    // mat_VV.height = h, mat_VV.height = w;
-    // for(int i=0;i<h;i++){
-    //     mat_HH.data[i] = g_data + i*w;
-    //     mat_HV.data[i] = g_data + (i+h)*w;
-    //     mat_VV.data[i] = g_data + (i+2*h)*w;
-    // }
-    // PadData<<<1,3>>>(N, N);
+    for(int i=0;i<3;i++){
+        HostInitMat(img[i], h, w);
+        cudaMemcpy2D(img[i].meta_data, img[i].pitch, img_HH, sizeof(cuComplex)*w, sizeof(cuComplex)*w, img[i].height, cudaMemcpyHostToDevice);
+        imgPad[i] = HostPadMat(img[i], N, N);    // pad to use sliding windows
+    }
+    PrintData<<<1,1>>>();
     cudaDeviceSynchronize();
     printf("%d\n", img[1].height);
     // test<<<20,20>>>();
