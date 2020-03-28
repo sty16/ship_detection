@@ -185,6 +185,17 @@ __host__ void HostDestroyImg(cuImg &img){
     cudaFree(img.meta_data);
 }
 
+__device__ void DeviceDestroyMat(cuMat mat, char *begin, int &pointer)
+{
+    pointer = pointer - mat.height*mat.width*sizeof(cuComplex);
+    cuComplex *temp = (cuComplex *)((char *)begin + pointer);
+    if(temp != mat.meta_data)
+    {
+        printf("cudaFreeFailure\n");
+        pointer = pointer + mat.height*mat.width*sizeof(cuComplex);   //线程空间相当于栈空间，注意先进后出的释放顺序
+    }
+}
+
 __device__  cuMat  MulMat(cuMat a, cuMat b, cuComplex alpha){
    cuMat res; 
    if(a.width == b.height){
@@ -242,4 +253,44 @@ __device__ cuMat HerMat(cuMat mat, char *begin, int &pointer, cuComplex alpha)
     cuMatHer<<<griddim, blockdim>>>(mat, res, alpha);
     cudaDeviceSynchronize();
     return res;
+}
+
+__device__ cuComplex MatDet(cuMat mat, char *begin, int &pointer)
+{
+    if(mat.height != mat.width)
+    {
+        printf("the height and width of the matrix are not match\n");
+        return make_cuComplex(0, 0);
+    }
+    if(mat.height == 1)
+    {
+        cuComplex det = mat.meta_data[INDEX(0, 0, mat.width)];
+        return det;
+    }
+    cuMat temp;
+    DeviceInitMat(temp, begin, pointer, mat.height-1, mat.width-1);
+    cuComplex det = make_cuComplex(0, 0);
+    int row, col;
+    for(int i = 0; i < mat.height; i++)
+    {
+        for(int j = 0; j < mat.height - 1; j++)
+        {
+            for(int k = 0; k < mat.width - 1; k++)
+            {
+                row = j + 1;
+                col = (k>=i)?k+1:k;
+                temp.meta_data[INDEX(j, k, temp.width)] = mat.meta_data[INDEX(row, col, mat.width)];
+            }
+        }
+        cuComplex cofactor = MatDet(temp, begin, pointer);
+        // printf("%f,%f\n", cofactor.x, cofactor.y);
+        if(i%2 == 0)
+        {
+            det = cuCaddf(det, cuCmulf(mat.meta_data[INDEX(0, i, mat.width)], cofactor));
+        }else{
+            det = cuCsubf(det, cuCmulf(mat.meta_data[INDEX(0, i, mat.width)], cofactor));
+        }
+    }
+    DeviceDestroyMat(temp, begin, pointer);    // 释放递归过程中分配的线程栈空间
+    return det;
 }
