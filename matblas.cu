@@ -14,6 +14,18 @@ __global__ void cuMatMul(cuMat a, cuMat b, cuMat res, cuComplex alpha) {
     // cuCaddf add two cuComplex; cuCmulf multiply two cuComplex
 }
 
+__global__ void cuMatHer(cuMat a, cuMat res, cuComplex alpha){
+    int i = threadIdx.x + blockDim.x * blockIdx.x;
+    int j = threadIdx.y + blockDim.y * blockIdx.y;
+    if(i < res.height && j < res.width){
+        res.meta_data[INDEX(i, j, res.width)] = make_cuComplex(0, 0);
+        for(int k = 0;k < a.width; k++){
+            res.meta_data[INDEX(i, j, res.width)] = cuCaddf(res.meta_data[INDEX(i, j, res.width)], cuCmulf(a.meta_data[INDEX(i, k, a.width)], cuConjf(a.meta_data[INDEX(j, k, a.width)])));    
+        }
+        res.meta_data[INDEX(i, j, res.width)] = cuCmulf(alpha, res.meta_data[INDEX(i, j, res.width)]);
+    }
+}
+
 __global__ void  cuMatPad(cuMat a, cuMat res, int pad_row, int pad_col){
     int i = threadIdx.x + blockDim.x * blockIdx.x;  // the ith row
     int j = threadIdx.y + blockDim.y * blockIdx.y;
@@ -74,9 +86,9 @@ __global__ void transposeSmem(cuMat a, cuMat res){                  // use share
    __syncthreads();                                                                  //wait for the tile filled with value;
     if(row<res.height && col<res.width){
         if(blockIdx.x < m && blockIdx.y < n){
-            res.data[row][col] = tile[tcol][trow];                                        //coalesced  write
+            res.data[row][col] = cuConjf(tile[tcol][trow]);                                        //coalesced  write
         }else{
-            res.data[row][col] = a.data[i][j];
+            res.data[row][col] = cuConjf(a.data[i][j]);
         }
     }
 }
@@ -90,7 +102,7 @@ __global__ void transposeDmem(cuMat a, cuMat res){
     int n = a.width/blockDim.y;
     if(blockIdx.x < m && blockIdx.y < n)
     {                                                                              // full block and non-full block
-        tile[threadIdx.x][threadIdx.y] = a.meta_data[INDEX(i,j,a.width)]; 
+        tile[threadIdx.x][threadIdx.y] = a.meta_data[INDEX(i, j, a.width)]; 
         int numx;                       // find the index  
         numx = threadIdx.x*blockDim.y + threadIdx.y;
         trow = numx / blockDim.x;
@@ -103,9 +115,9 @@ __global__ void transposeDmem(cuMat a, cuMat res){
    __syncthreads();                                                                  //wait for the tile filled with value;
     if(row<res.height && col<res.width){
         if(blockIdx.x < m && blockIdx.y < n){
-            res.meta_data[INDEX(row, col, res.width)] = tile[tcol][trow];                                        //coalesced  write
+            res.meta_data[INDEX(row, col, res.width)] = cuConjf(tile[tcol][trow]);                                        //coalesced  write
         }else{
-            res.meta_data[INDEX(row, col, res.width)] = a.meta_data[INDEX(i,j,a.width)];
+            res.meta_data[INDEX(row, col, res.width)] = cuConjf(a.meta_data[INDEX(i, j, a.width)]);
         }
     }
 }
@@ -218,5 +230,16 @@ __device__ cuMat DeviceTransMat(cuMat a, char *begin, int &pointer){
     transposeSmem<<<griddim, blockdim>>>(a, res); 
     cudaDeviceSynchronize();
     printf("%d", res.height);
+    return res;
+} 
+
+__device__ cuMat HerMat(cuMat mat, char *begin, int &pointer, cuComplex alpha)
+{
+    cuMat res;
+    DeviceInitMat(res, begin, pointer, mat.height, mat.height);
+    dim3 blockdim(16, 16);
+    dim3 griddim(res.height/16 + 1, res.width/16 + 1);
+    cuMatHer<<<griddim, blockdim>>>(mat, res, alpha);
+    cudaDeviceSynchronize();
     return res;
 }

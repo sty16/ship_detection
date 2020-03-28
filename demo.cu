@@ -15,7 +15,7 @@ __device__ __managed__ char *MemPool;            // the global memory that threa
 __device__ __managed__ cuImg result;             // the  result of the pwf image
 
 
-__device__ void CopyData(cuMat out, int row, int col, int pad_row, int pad_col){
+__global__ void CopyData(cuMat out, int row, int col, int pad_row, int pad_col){
     int i = threadIdx.x;
     int j = threadIdx.y;
     if(i < 2*pad_row && j < 2*pad_col)
@@ -23,10 +23,9 @@ __device__ void CopyData(cuMat out, int row, int col, int pad_row, int pad_col){
         int col_out = i*2*pad_col + j;
         for(int k = 0;k < 3;k++)
         {
-            out.meta_data[INDEX(k, col_out, out.width)] =  imPad[k].data[row+i][]
+            out.meta_data[INDEX(k, col_out, out.width)] =  imgPad[k].data[row+i][col+j];
         }
     }
-
 }
 __global__ void f_PWF(int pad_row, int pad_col, int row) 
 {
@@ -36,11 +35,21 @@ __global__ void f_PWF(int pad_row, int pad_col, int row)
     t_row = row;
     t_col = INDEX(c_row, c_col, blockDim.y);
     char *ThreadMemPool = (char *)MemPool + INDEX(c_row, c_col, blockDim.y)*THREADSPACE;
-    cuMat clutter;
-    DeviceInitMat(clutter, ThreadMemPool, pointer, 3, N);
-    gdim = (1, 1);
-    bdim = (32, 32);
-    // __shared__ cuComplex[2700];  // 两种方案，第一种共享内存，第二种提前分配好空间  设置一个指针指向其分配位置 ， 每个线程最大3MB 40万个double
+    cuMat clutter, sigma_c;
+    if(t_col < img[1].width){
+        DeviceInitMat(clutter, ThreadMemPool, pointer, 3, N);
+        dim3 gdim(1, 1);
+        dim3 bdim(32, 32);
+        CopyData<<<gdim, bdim>>>(clutter, t_row, t_col, pad_row, pad_col);    // copy global data to the thread clutter memory
+        cudaDeviceSynchronize();
+        cuComplex alpha = make_cuComplex(1.0/N, 0);
+        sigma_c = HerMat(clutter, ThreadMemPool, pointer, alpha);
+    }
+    if(t_row==0&&t_col == 1){
+        printf("%d\n", pointer);
+        printf("(%f,%f)", clutter.meta_data[INDEX(0,0,clutter.width)].x, clutter.meta_data[INDEX(0,0,clutter.width)].y);
+    }
+   // __shared__ cuComplex[2700];  // 两种方案，第一种共享内存，第二种提前分配好空间  设置一个指针指向其分配位置 ， 每个线程最大3MB 40万个double
     // cuMat clutter, sigma_c;
     // InitMat(clutter, M, N);
     // __syncthreads();

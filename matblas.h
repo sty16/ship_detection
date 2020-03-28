@@ -29,6 +29,8 @@ struct cuImg{
 __global__ void cuMatMul(cuMat a, cuMat b, cuMat res, cuComplex alpha); // launch kernel to compute matrix multiplication in parallel
 __global__ void cuMatPad(cuMat a, cuMat res, int pad_row, int pad_col); // launch kernel to pad matrix in parallel
 __global__ void transposeSmem(cuMat a, cuMat res);                      // launch kernel to tranpose matrix
+__global__ void transposeDmem(cuMat a, cuMat res);
+__global__ void cuMatHer(cuMat a, cuMat res, cuComplex alpha);
 __device__ void InitMat(cuMat &mat, int h, int w);                      // Initial matrix with size(h,w) and zero value from GPU
 __host__ void HostInitMat(cuMat &mat, int h, int w);                    // Initial matrix with size(h,w) and zero value from CPU
 __device__ void DeviceInitMat(cuMat &mat, char *begin, int &pointer, int h, int w);     // Initial matrix with size(h,w) on the pre-allocated thread space
@@ -40,6 +42,7 @@ __device__ cuMat MulMat(cuMat a, cuMat b, cuComplex alpha);             // retur
 __host__ cuMat HostPadMat(cuMat a, int pad_row, int pad_col);           // Extend the matrix with size(a.h+2*pad_row, a.w+2*pad_col)
 __device__ cuMat TransposeMat(cuMat a);                                 // transpose matrix using shared memory
 __device__ cuMat DeviceTransMat(cuMat a, char *begin, int &pointer);
+__device__ cuMat HerMat(cuMat mat, char *begin, int &pointer, cuComplex alpha);         // compute res = α*mat*mat_H  in which res is a Hermitian matrix
 #endif
 
 //当block中的线程数量大于给定值，则无法执行 32x32
