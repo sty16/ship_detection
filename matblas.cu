@@ -1,5 +1,6 @@
 #include"matblas.h"
 
+// 使用显存前必须初始化，因为该显存可能已经使用过
 __global__ void cuMatMul(cuMat a, cuMat b, cuMat res, cuComplex alpha) {
     int i = threadIdx.x + blockDim.x * blockIdx.x;
     int j = threadIdx.y + blockDim.y * blockIdx.y;
@@ -118,6 +119,36 @@ __global__ void transposeDmem(cuMat a, cuMat res){
             res.meta_data[INDEX(row, col, res.width)] = cuConjf(tile[tcol][trow]);                                        //coalesced  write
         }else{
             res.meta_data[INDEX(row, col, res.width)] = cuConjf(a.meta_data[INDEX(i, j, a.width)]);
+        }
+    }
+}
+
+__global__ void cuMatInv(cuMat a, cuMat res, cuComplex det, char *begin, int threadsize)
+{
+    // detsize 每个线程的字节数
+    int i = threadIdx.x + blockDim.x * blockIdx.x;  
+    int j = threadIdx.y + blockDim.y * blockIdx.y;
+    int pointer = 0;
+    if(i < a.height && j < a.width)
+    {
+        char *threadMempool = (char *)begin + INDEX(i, j, a.width)*threadsize;
+        cuMat temp;
+        DeviceInitMat(temp, threadMempool, pointer, a.height-1, a.width-1);
+        for(int k = 0;k < temp.height; k++)
+        {
+            for(int t = 0; t < temp.width; t++)
+            {
+                int row = k>=i?k+1:k;
+                int col = t>=j?t+1:t;
+                temp.meta_data[INDEX(k, t, temp.width)] = a.meta_data[INDEX(row, col, a.width)];
+            }
+        }
+        cuComplex  temp_det = MatDet(temp, threadMempool, pointer);
+        res.meta_data[INDEX(j, i, res.width)] = cuCdivf(temp_det, det);
+        if((i+j)%2 == 1)
+        {
+            cuComplex alpha = make_cuComplex(-1, 0);
+            res.meta_data[INDEX(j, i, res.width)] = cuCmulf(res.meta_data[INDEX(j, i, res.width)], alpha);
         }
     }
 }
@@ -267,6 +298,10 @@ __device__ cuComplex MatDet(cuMat mat, char *begin, int &pointer)
         cuComplex det = mat.meta_data[INDEX(0, 0, mat.width)];
         return det;
     }
+    if(mat.height == 2){
+        cuComplex det = cuCsubf(cuCmulf(mat.meta_data[0], mat.meta_data[3]), cuCmulf(mat.meta_data[1], mat.meta_data[2]));
+        return det;
+    }
     cuMat temp;
     DeviceInitMat(temp, begin, pointer, mat.height-1, mat.width-1);
     cuComplex det = make_cuComplex(0, 0);
@@ -293,4 +328,113 @@ __device__ cuComplex MatDet(cuMat mat, char *begin, int &pointer)
     }
     DeviceDestroyMat(temp, begin, pointer);    // 释放递归过程中分配的线程栈空间
     return det;
+}
+
+__device__ cuComplex ComputeDet(cuMat mat){
+    // only for matrix with size 3x3
+    cuComplex res = make_cuComplex(0,0);
+    cuComplex det1 = cuCsubf(cuCmulf(mat.meta_data[4], mat.meta_data[8]), cuCmulf(mat.meta_data[5], mat.meta_data[7]));
+    cuComplex det2 = cuCsubf(cuCmulf(mat.meta_data[3], mat.meta_data[8]), cuCmulf(mat.meta_data[5], mat.meta_data[6]));
+    cuComplex det3 = cuCsubf(cuCmulf(mat.meta_data[3], mat.meta_data[7]), cuCmulf(mat.meta_data[4], mat.meta_data[6]));
+    res = cuCaddf(res, cuCmulf(mat.meta_data[0], det1));
+    res = cuCsubf(res, cuCmulf(mat.meta_data[1], det2));
+    res = cuCaddf(res, cuCmulf(mat.meta_data[2], det3));
+    return res;
+}
+
+__device__ cuMat MatInv(cuMat mat, char *begin, int &pointer)
+{
+    cuMat res, temp;
+    if(mat.height != mat.width)
+    {
+        printf("The matrix is not a square matrix\n");
+        res.height = 0; res.width = 0;
+        return res;
+    }else{
+        cuComplex mat_det = ComputeDet(mat);
+        mat_det = MatDet(mat, begin, pointer);
+        if(cuCabsf(mat_det) < (float) 1e-5)
+        {
+            printf("the matrix is strange");          //矩阵奇异
+            res.height = 0;res.width = 0;
+            return res;
+        }
+        DeviceInitMat(res, begin, pointer, mat.height, mat.width); 
+        if(mat.height == 1)
+        {
+            cuComplex temp = make_cuComplex(1, 0);
+            res.meta_data[0] = cuCdivf(temp, mat_det);
+            return res;
+        }
+        DeviceInitMat(temp, begin, pointer, res.height-1, res.width-1);
+        for(int i=0; i<res.height;i++)
+        {
+            for(int j=0;j<res.width;j++)
+            {
+                for(int k=0;k<temp.height;k++)
+                {
+                    for(int t=0;t<temp.width;t++)
+                    {
+                        int row = k>=i?k+1:k;
+                        int col = t>=j?t+1:t;
+                        temp.meta_data[INDEX(k, t, temp.width)] = mat.meta_data[INDEX(row, col, mat.width)];
+                    }
+                } 
+                cuComplex temp_det = cuCsubf(cuCmulf(temp.meta_data[0],temp.meta_data[3]), cuCmulf(temp.meta_data[1], temp.meta_data[2]));
+                // temp_det = MatDet(temp, begin, pointer);
+                // printf("%f,%f\n", temp_det.x, temp_det.y);
+                res.meta_data[INDEX(j, i, res.width)] = cuCdivf(temp_det, mat_det);
+                if((i+j)%2 == 1)
+                {
+                    cuComplex alpha = make_cuComplex(-1, 0);
+                    res.meta_data[INDEX(j, i, res.width)] = cuCmulf(res.meta_data[INDEX(j, i, res.width)], alpha);
+                }
+            }
+        }
+        DeviceDestroyMat(temp, begin, pointer);
+        return res;
+    }
+}// 采用并行方式快速求逆矩阵    一个kernel调用完成一行的元素求逆矩阵，还是在线程的空间进行分配 给出去当前的地址，作为新kernel的起始地址，并判断
+//是否还有足够的空间，此外还可以通过共享内存
+__device__ cuMat MatInvParal(cuMat mat, char *begin, int &pointer)
+{
+    // 计算并行所需的内存空间看是否还能够满足 can approve the max size smaller than 32x32
+    cuMat res;
+    if(mat.height != mat.width)
+    {
+        printf("The matrix is not a square matrix\n");
+        res.height = 0; res.width = 0;
+        return res;
+    }else{
+        cuComplex mat_det;
+        mat_det = MatDet(mat, begin, pointer);
+        if(cuCabsf(mat_det) < (float) 1e-5)
+        {
+            printf("the matrix is strange");          //矩阵奇异
+            res.height = 0;res.width = 0;
+            return res;
+        }
+        DeviceInitMat(res, begin, pointer, mat.height, mat.width); 
+        if(mat.height == 1)
+        {
+            cuComplex temp = make_cuComplex(1, 0);
+            res.meta_data[0] = cuCdivf(temp, mat_det);
+            return res;
+        }
+        int threadsize = ((mat.height-1)*(mat.width-1) + (mat.width-1)*(mat.width)*(2*mat.width-1)/6 + 50)*sizeof(cuComplex);
+        int InvSize = mat.height*mat.width*threadsize;  // 50 to insure enough space
+        if((pointer + InvSize) > THREADSPACE){
+            printf("the matrix is too large and can be inversed in the threadspace\n");
+            DeviceDestroyMat(res, begin, pointer);
+            res.height = 0;res.width = 0;
+            return res;
+        }else{
+            char *InvStart = (char *)begin + pointer;
+            dim3 blockdim(32, 32);
+            dim3 griddim(1, 1);
+            cuMatInv<<<griddim, blockdim>>>(mat, res, mat_det, InvStart, threadsize);
+            cudaDeviceSynchronize();
+            return res;
+        }
+    }
 }
