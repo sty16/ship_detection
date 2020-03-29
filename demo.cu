@@ -5,14 +5,17 @@
 #include"device_launch_parameters.h"
 #include<cuda_runtime.h>
 #include<cublas_v2.h>
+#include<opencv2/opencv.hpp>
 #include<helper_cuda.h>
 #include<helper_functions.h>
+
+using namespace cv;
 
 //global variable
 __device__ __managed__ cuMat imgPad[3];          //device variable managed variable,to which Host is accessible
 __device__ __managed__ cuMat img[3];             // the matrix of the origin image
 __device__ __managed__ char *MemPool;            // the global memory that thread have  内存池
-__device__ __managed__ cuImg result;             // the  result of the pwf image
+__device__ __managed__ cuImg resImg;             // the  result of the pwf image
 
 
 __global__ void CopyData(cuMat out, int row, int col, int pad_row, int pad_col){
@@ -44,7 +47,7 @@ __device__ void copyToClutter(cuMat clutter, int row, int col, int pad_row, int 
 }
 // 多线程中复制使用多线程会显著降低性能，因为此时的线程数量过多
 
-__global__ void f_PWF(int pad_row, int pad_col, int num) 
+__global__ void f_PWF(int pad_row, int pad_col, int num, float T) 
 {
     size_t pointer = 0;
     int c_row, t_row, t_col, N=900;                // set the pointer 0 && set the sliding window size 30
@@ -80,17 +83,10 @@ __global__ void f_PWF(int pad_row, int pad_col, int num)
             result = cuCaddf(result, cuCmulf(cuConjf(data[i]), temp[i]));
         }
         res = cuCabsf(result);
+        resImg.data[t_row][t_col] = res>T?255:0;
+        // printf("%lu\n", pointer);
+        // printf("%f\n", res);
     }
-    // if(t_col < img[1].width)
-    // {
-    //     DeviceInitMat(clutter, ThreadMemPool, pointer, 3, N);
-    //     dim3 gdim(1, 1);
-    //     dim3 bdim(32, 32);
-    //     CopyData<<<gdim, bdim>>>(clutter, t_row, t_col, pad_row, pad_col);    // copy global data to the thread clutter memory
-    //     cudaDeviceSynchronize();
-    //     cuComplex alpha = make_cuComplex(1.0/N, 0);
-    //     sigma_c = HerMat(clutter, ThreadMemPool, pointer, alpha);
-    //     sigma_inv = MatInvParal(sigma_c, ThreadMemPool, pointer);
    if(t_col == 1)
     {
         // printf("%d\n", t_row);
@@ -170,8 +166,9 @@ int main(){
     const char *param_VV = "imagery_VV";
     complex<float> *img_mat[3];
     int h = 1000, w = 1000, N = 15;                               //size of the image data
-    float Pfa = 0.001;
+    float Pfa = 0.001; char *resImg_host;
     float T = get_T_PWF(3, Pfa);
+    resImg_host = new char[h*w];
     // printf("%f", T);
     img_mat[0] = matToArray(matfile_HH, param_HH);
     img_mat[1] = matToArray(matfile_HV, param_HV);
@@ -181,8 +178,8 @@ int main(){
         cudaMemcpy2D(img[i].meta_data, img[i].pitch, img_mat[i], sizeof(cuComplex)*w, sizeof(cuComplex)*w, img[i].height, cudaMemcpyHostToDevice);
         imgPad[i] = HostPadMat(img[i], N, N);    // pad to use sliding windows
     }
-    HostInitImg(result, h, w);
-    dim3 griddim(16,8);
+    HostInitImg(resImg, h, w);
+    dim3 griddim(16,16);
     dim3 blockdim(32,32);
     size_t size = (size_t)THREADSPACE*blockdim.x*blockdim.y*griddim.x*griddim.y;
     printf("%lu", size);
@@ -193,15 +190,33 @@ int main(){
       case cudaErrorMemoryAllocation:printf("cudaErrorMemoryAllocation\n");break;
       default:printf("default: %d \n",error_t );break;
     }
-    for(int row = 0;row <= h/128;row++)
+    for(int row = 0;row <= h/256;row++)
     {
-        f_PWF<<<griddim,blockdim>>>(N, N, row);
+        f_PWF<<<griddim,blockdim>>>(N, N, row, T);
         cudaDeviceSynchronize();
         printf("ok");
     }
     printf("%d\n", img[1].height);
     printf("%lu\n", sizeof(size_t));
     cudaDeviceSynchronize();
+    Mat detect_res = Mat::zeros(h, w, CV_8UC1);
+    cudaMemcpy2D(resImg_host, w*sizeof(char), resImg.meta_data, resImg.pitch, sizeof(char)*w, h, cudaMemcpyDeviceToHost);
+    for(int i=0;i<h;i++)
+    {
+        for(int j=0;j<w;j++)
+        {
+            detect_res.at<uchar>(i,j) = resImg_host[INDEX(i, j, w)];
+        }
+    }
+    imshow("detected" , detect_res);
+    while(char(waitKey())!='q') 
+	{    
+    }
+    detect_res.release();
+    // for(int i=0;i<3;i++)
+    // {
+    //     HostDestroyMat(img[i]);
+    // }
     // double *a, *b, *d_B, *d_A, *d_C, *c;
     // cudaMalloc((void**)&d_C, sizeof(double)*3*3);
     // cudaMalloc((void**)&d_B, 6*sizeof(double));

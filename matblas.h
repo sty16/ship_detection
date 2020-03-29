@@ -8,7 +8,7 @@ using namespace std;
 #define BDIMX 32
 #define BDIMY BDIMX
 typedef unsigned char uint8;
-#define THREADSPACE 65536                     // every thread hava global memory 64KB pay attention to that int can express maximum range 2GB
+#define THREADSPACE 32768                     // every thread hava global memory 64KB pay attention to that int can express maximum range 2GB
 
 struct cuMat{
     int height;
