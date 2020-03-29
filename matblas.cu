@@ -128,7 +128,7 @@ __global__ void cuMatInv(cuMat a, cuMat res, cuComplex det, char *begin, int thr
     // detsize 每个线程的字节数
     int i = threadIdx.x + blockDim.x * blockIdx.x;  
     int j = threadIdx.y + blockDim.y * blockIdx.y;
-    int pointer = 0;
+    size_t pointer = 0;
     if(i < a.height && j < a.width)
     {
         char *threadMempool = (char *)begin + INDEX(i, j, a.width)*threadsize;
@@ -175,10 +175,10 @@ __host__ void HostInitMat(cuMat &mat, int h, int w){
     // Memory does not need to be initialized to ensure speed
 }
 
-__device__ void DeviceInitMat(cuMat &mat, char *begin, int &pointer, int h, int w){
+__device__ void DeviceInitMat(cuMat &mat, char *begin, size_t &pointer, int h, int w){
     // begin 线程数据起使地址 pointer当前的指针字节位置
     mat.meta_data = (cuComplex *)((char *)begin + pointer); //分配矩阵地址
-    pointer = pointer + h*w*sizeof(cuComplex);    // 指针进行偏移
+    pointer = pointer + (size_t)h*w*sizeof(cuComplex);    // 指针进行偏移
     if(pointer >=  THREADSPACE){
         printf("ErrorMallocAllocation\n");
         mat.height = 0;
@@ -216,7 +216,7 @@ __host__ void HostDestroyImg(cuImg &img){
     cudaFree(img.meta_data);
 }
 
-__device__ void DeviceDestroyMat(cuMat mat, char *begin, int &pointer)
+__device__ void DeviceDestroyMat(cuMat mat, char *begin, size_t &pointer)
 {
     pointer = pointer - mat.height*mat.width*sizeof(cuComplex);
     cuComplex *temp = (cuComplex *)((char *)begin + pointer);
@@ -264,7 +264,7 @@ __device__ cuMat TransposeMat(cuMat a){
     return res;
 } 
 
-__device__ cuMat DeviceTransMat(cuMat a, char *begin, int &pointer){
+__device__ cuMat DeviceTransMat(cuMat a, char *begin, size_t &pointer){
     cuMat res;
     DeviceInitMat(res, begin, pointer, a.width, a.height);
     dim3 blockdim(32, 32);
@@ -275,18 +275,18 @@ __device__ cuMat DeviceTransMat(cuMat a, char *begin, int &pointer){
     return res;
 } 
 
-__device__ cuMat HerMat(cuMat mat, char *begin, int &pointer, cuComplex alpha)
+__device__ cuMat HerMatParal(cuMat mat, char *begin, size_t &pointer, cuComplex alpha)
 {
     cuMat res;
     DeviceInitMat(res, begin, pointer, mat.height, mat.height);
-    dim3 blockdim(16, 16);
-    dim3 griddim(res.height/16 + 1, res.width/16 + 1);
+    dim3 blockdim(mat.height, mat.height);
+    dim3 griddim(1, 1);
     cuMatHer<<<griddim, blockdim>>>(mat, res, alpha);
     cudaDeviceSynchronize();
     return res;
 }
 
-__device__ cuComplex MatDet(cuMat mat, char *begin, int &pointer)
+__device__ cuComplex MatDet(cuMat mat, char *begin, size_t &pointer)
 {
     if(mat.height != mat.width)
     {
@@ -342,7 +342,7 @@ __device__ cuComplex ComputeDet(cuMat mat){
     return res;
 }
 
-__device__ cuMat MatInv(cuMat mat, char *begin, int &pointer)
+__device__ cuMat MatInv(cuMat mat, char *begin, size_t &pointer)
 {
     cuMat res, temp;
     if(mat.height != mat.width)
@@ -396,7 +396,7 @@ __device__ cuMat MatInv(cuMat mat, char *begin, int &pointer)
     }
 }// 采用并行方式快速求逆矩阵    一个kernel调用完成一行的元素求逆矩阵，还是在线程的空间进行分配 给出去当前的地址，作为新kernel的起始地址，并判断
 //是否还有足够的空间，此外还可以通过共享内存
-__device__ cuMat MatInvParal(cuMat mat, char *begin, int &pointer)
+__device__ cuMat MatInvParal(cuMat mat, char *begin, size_t &pointer)
 {
     // 计算并行所需的内存空间看是否还能够满足 can approve the max size smaller than 32x32
     cuMat res;
@@ -437,4 +437,23 @@ __device__ cuMat MatInvParal(cuMat mat, char *begin, int &pointer)
             return res;
         }
     }
+}
+
+__device__ cuMat HerMat(cuMat a, char *begin, size_t &pointer, cuComplex alpha)
+{
+    cuMat res;
+    DeviceInitMat(res, begin, pointer, a.height, a.height);
+    for(int i=0;i<res.height;i++)
+    {
+        for(int j=0;j<res.width;j++)
+        {
+            res.meta_data[INDEX(i, j, res.width)] = make_cuComplex(0, 0);
+            for(int k = 0;k < a.width; k++)
+            {
+                res.meta_data[INDEX(i, j, res.width)] = cuCaddf(res.meta_data[INDEX(i, j, res.width)], cuCmulf(a.meta_data[INDEX(i, k, a.width)], cuConjf(a.meta_data[INDEX(j, k, a.width)])));    
+            }
+            res.meta_data[INDEX(i, j, res.width)] = cuCmulf(alpha, res.meta_data[INDEX(i, j, res.width)]);
+        }
+    }
+    return res;
 }

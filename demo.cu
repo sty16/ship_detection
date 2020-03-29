@@ -28,92 +28,99 @@ __global__ void CopyData(cuMat out, int row, int col, int pad_row, int pad_col){
     }
 }
 
-__global__ void f_PWF(int pad_row, int pad_col, int row) 
+__device__ void copyToClutter(cuMat clutter, int row, int col, int pad_row, int pad_col)
 {
-    int pointer = 0, c_row, c_col, t_row, t_col, N=900;                // set the pointer 0 && set the sliding window size 30
-    cuComplex  s[9], sigmac_det;
-    c_row = threadIdx.x;
-    c_col = threadIdx.y;
-    t_row = row;
-    t_col = INDEX(c_row, c_col, blockDim.y);
-    char *ThreadMemPool = (char *)MemPool + INDEX(c_row, c_col, blockDim.y)*THREADSPACE;   // 找到线程自己的全局内存池位置
-    cuMat clutter, sigma_c, sigma_inv;
-    if(t_col < img[1].width)
+    for(int k=0;k<3;k++)
     {
-        // DeviceInitMat(clutter, ThreadMemPool, pointer, 3, N);
-        // dim3 gdim(1, 1);
-        // dim3 bdim(32, 32);
-        // CopyData<<<gdim, bdim>>>(clutter, t_row, t_col, pad_row, pad_col);    // copy global data to the thread clutter memory
-        // cudaDeviceSynchronize();
-        // cuComplex alpha = make_cuComplex(1.0/N, 0);
-        // sigma_c = HerMat(clutter, ThreadMemPool, pointer, alpha);
-        // cuComplex det = MatDet(sigma_c, ThreadMemPool, pointer);
-        // cuComplex det_1 = ComputeDet(sigma_c);
-        // sigma_inv = MatInv(sigma_c, ThreadMemPool, pointer);
-        // printf("%f,%f\n", det.x, det_1.x);
-        // for(int i=0;i < 3;i++)
-        // {
-        //     for(int j=0; j<3;j++)
-        //     {
-        //         if(t_col == 1)
-        //         {
-        //             printf("%f,%f\n", clutter.meta_data[1].x, clutter.meta_data[901].x);
-        //             printf("%f,%f\n", det.x, det.y);
-        //             // printf("(%f,%f)\n",sigma_c.meta_data[INDEX(i, j, sigma_c.width)].x, sigma_c.meta_data[INDEX(i, j, sigma_c.width)].y); 
-        //         }
-        //     }
-        // }
-        cuMat temp1, temp1_inv;
-        DeviceInitMat(temp1, ThreadMemPool, pointer, 4, 4);
-        for(int i=0;i<4;i++){
-            for(int j = 0;j<4;j++){
-                temp1.meta_data[INDEX(i, j, temp1.width)] = make_cuComplex(i*4+j+1,0);
+        for(int i=0;i<2*pad_row;i++)
+        {
+            for(int j = 0;j<2*pad_col;j++)
+            {
+                int temp = i*2*pad_col + j;
+                clutter.meta_data[INDEX(k, temp, clutter.width)] = imgPad[k].meta_data[INDEX(row+i, col+j, imgPad[k].width)];
             }
         }
-        temp1.meta_data[INDEX(0,2,temp1.width)] = make_cuComplex(1,0);
-        temp1.meta_data[INDEX(1,2,temp1.width)] = make_cuComplex(0,0);
-        temp1.meta_data[INDEX(2,1,temp1.width)] = make_cuComplex(1,0);
-        cuComplex det = MatDet(temp1, ThreadMemPool, pointer);
-        printf("%f,%f\n",det.x, det.y);
-        temp1_inv = MatInvParal(temp1, ThreadMemPool, pointer);
-        for(int i=0;i<4;i++){
-            for(int j = 0;j<4;j++){
-                if(t_col == 1){
-                    printf("(%f,%f)", temp1_inv.meta_data[INDEX(i, j, temp1_inv.width)].x, temp1_inv.meta_data[INDEX(i, j, temp1_inv.width)].y);
-                }
-            }
-            if(t_col == 1){
-                printf("\n");
-            }
-        }
-        // printf("ok");
     }
-    if(t_row==0&&t_col == 1){
+}
+// 多线程中复制使用多线程会显著降低性能，因为此时的线程数量过多
+
+__global__ void f_PWF(int pad_row, int pad_col, int num) 
+{
+    size_t pointer = 0;
+    int c_row, t_row, t_col, N=900;                // set the pointer 0 && set the sliding window size 30
+    cuComplex  data[3], temp[3], result;
+    float res;
+    c_row = blockIdx.x*gridDim.y + blockIdx.y;
+    t_row = c_row + num*gridDim.x*gridDim.y;
+    t_col = INDEX(threadIdx.x, threadIdx.y, blockDim.y);
+    if(t_row < img[0].height && t_col < img[0].width)
+    {
+        char *ThreadMemPool = (char *)MemPool + (size_t)INDEX(c_row, t_col, img[0].width)*THREADSPACE;   // 找到线程自己的全局内存池位置
+        cuMat clutter, sigma_c, sigma_inv;
+        DeviceInitMat(clutter, ThreadMemPool, pointer, 3, N);
+        copyToClutter(clutter, t_row, t_col, pad_row, pad_col);
+        cuComplex alpha = make_cuComplex(1.0/N, 0);
+        sigma_c = HerMat(clutter, ThreadMemPool, pointer, alpha);
+        sigma_inv = MatInv(sigma_c, ThreadMemPool, pointer);
+        for(int i=0;i < 3;i++)
+        {
+            data[i] =  img[i].meta_data[INDEX(t_row, t_col, img[i].width)];
+        }
+        for(int i=0;i<3;i++)
+        {
+            temp[i] = make_cuComplex(0, 0);
+            for(int j=0;j<3;j++)
+            {
+                temp[i] = cuCaddf(temp[i], cuCmulf(sigma_inv.meta_data[INDEX(i, j, sigma_inv.width)], data[j]));
+            }
+        }
+        result = make_cuComplex(0, 0);
+        for(int i=0;i<3;i++)
+        {
+            result = cuCaddf(result, cuCmulf(cuConjf(data[i]), temp[i]));
+        }
+        res = cuCabsf(result);
+    }
+    // if(t_col < img[1].width)
+    // {
+    //     DeviceInitMat(clutter, ThreadMemPool, pointer, 3, N);
+    //     dim3 gdim(1, 1);
+    //     dim3 bdim(32, 32);
+    //     CopyData<<<gdim, bdim>>>(clutter, t_row, t_col, pad_row, pad_col);    // copy global data to the thread clutter memory
+    //     cudaDeviceSynchronize();
+    //     cuComplex alpha = make_cuComplex(1.0/N, 0);
+    //     sigma_c = HerMat(clutter, ThreadMemPool, pointer, alpha);
+    //     sigma_inv = MatInvParal(sigma_c, ThreadMemPool, pointer);
+   if(t_col == 1)
+    {
+        // printf("%d\n", t_row);
+    }
+        // printf("%f\n", res);
         // cuMat temp1, temp1_inv;
-        // DeviceInitMat(temp1, ThreadMemPool, pointer, 3, 3);
-        // for(int i=0;i<3;i++){
-        //     for(int j = 0;j<3;j++){
-        //         temp1.meta_data[INDEX(i, j, temp1.width)] = make_cuComplex(i*3+j+1,0);
+        // DeviceInitMat(temp1, ThreadMemPool, pointer, 4, 4);
+        // for(int i=0;i<4;i++){
+        //     for(int j = 0;j<4;j++){
+        //         temp1.meta_data[INDEX(i, j, temp1.width)] = make_cuComplex(i*4+j+1,0);
         //     }
         // }
         // temp1.meta_data[INDEX(0,2,temp1.width)] = make_cuComplex(1,0);
-        // temp1_inv = MatInv(temp1, ThreadMemPool, pointer);
+        // temp1.meta_data[INDEX(1,2,temp1.width)] = make_cuComplex(0,0);
+        // temp1.meta_data[INDEX(2,1,temp1.width)] = make_cuComplex(1,0);
         // cuComplex det = MatDet(temp1, ThreadMemPool, pointer);
-        // for(int i=0;i<3;i++){
-        //     for(int j = 0;j<3;j++){
-        //         printf("(%f,%f)", temp1_inv.meta_data[INDEX(i, j, temp1_inv.width)].x, temp1_inv.meta_data[INDEX(i, j, temp1_inv.width)].y);
+        // printf("%f,%f\n",det.x, det.y);
+        // temp1_inv = MatInvParal(temp1, ThreadMemPool, pointer);
+        // for(int i=0;i<4;i++){
+        //     for(int j = 0;j<4;j++){
+        //         if(t_col == 1){
+        //             printf("(%f,%f)", temp1_inv.meta_data[INDEX(i, j, temp1_inv.width)].x, temp1_inv.meta_data[INDEX(i, j, temp1_inv.width)].y);
+        //         }
         //     }
-        //     printf("\n");
+        //     if(t_col == 1){
+        //         printf("\n");
+        //     }
         // }
-        // printf("%f,%f\n", det.x, det.y);
-        // DeviceDestroyMat(temp1_inv, ThreadMemPool, pointer);
-        // DeviceInitMat(test, ThreadMemPool, pointer, 30, 40);
-        printf("%d\n", pointer);
-        // DeviceDestroyMat(temp1, ThreadMemPool, pointer);
-        printf("%d\n", pointer);
-        // printf("%f\n", sigma_c.meta_data[INDEX(0, 0, sigma_c.width)].x);
-        // printf("(%f,%f)", clutter.meta_data[INDEX(0,0,clutter.width)].x, clutter.meta_data[INDEX(0,0,clutter.width)].y);
-    }
+        // printf("ok");
+    // }
     // double *temp;
     // cudaError_t error_t = cudaMalloc((void **)temp, sizeof(double)*1000000); //分配的不是全局内存空间
     // switch( error_t )
@@ -122,6 +129,7 @@ __global__ void f_PWF(int pad_row, int pad_col, int row)
     //   case cudaErrorMemoryAllocation:printf("cudaErrorMemoryAllocation\n");break;
     //   default:printf("default: %d \n",error_t );break;
     // }
+
     // cuComplex alpha = make_cuComplex(1/N, 0);
     // sigma_c = MulMat(clutter, clutter_t, alpha);
     // if(c_col == 0){
@@ -153,38 +161,6 @@ __host__ float  get_T_PWF(int num, float P, int maxIter=500, double ep = 1e-5, d
     return (float)x;
 }
 
-__global__ void test() {
-    cuFloatComplex *a;
-    cudaMalloc((void**)&a, sizeof(cuFloatComplex)*1000);
-    // use cuComplex     
-    cuMat A, B, C, D;
-    cuComplex alpha = make_cuComplex(2.0, 0.0);
-    InitMat(A, 6, 6);
-    InitMat(B, 6, 6);
-    for(int i=0;i<6;i++)
-    {
-        for(int j=0;j<6;j++)
-        {
-            A.data[i][j] = make_cuComplex(i,j);
-            B.data[i][j] = make_cuComplex(i,j);
-        }
-    }
-    C = MulMat(A, B, alpha);
-    __syncthreads();
-    // D = PadMat(A, 2, 2);
-    __syncthreads();
-    DestroyMat(A);
-    DestroyMat(B);
-    // double *alpha, *beta;
-    // alpha = new double(1);
-    // beta = new double(0);
-    // cublasHandle_t handle;
-    // // cublasCreate(&handle);
-    // cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 3, 3, 2, alpha, d_B, 2, d_B, 2, beta, d_C, 3);
-    // printf("%f\n", d_C[1]); 
-}
-
-
 int main(){
     const char *matfile_HH = "./data/imagery_HH.mat";
     const char *param_HH = "imagery_HH";
@@ -206,10 +182,10 @@ int main(){
         imgPad[i] = HostPadMat(img[i], N, N);    // pad to use sliding windows
     }
     HostInitImg(result, h, w);
-    dim3 griddim(1,1);
+    dim3 griddim(16,8);
     dim3 blockdim(32,32);
-    int size = THREADSPACE*blockdim.x*blockdim.y*griddim.x*griddim.y;
-    printf("%d", size);
+    size_t size = (size_t)THREADSPACE*blockdim.x*blockdim.y*griddim.x*griddim.y;
+    printf("%lu", size);
     cudaError_t error_t = cudaMalloc((void **)&MemPool, sizeof(char)*size); //分配的不是全局内存空间
     switch( error_t )
     {
@@ -217,10 +193,14 @@ int main(){
       case cudaErrorMemoryAllocation:printf("cudaErrorMemoryAllocation\n");break;
       default:printf("default: %d \n",error_t );break;
     }
-    int row=0;
-    f_PWF<<<griddim,blockdim>>>(N, N, row);
-    cudaDeviceSynchronize();
+    for(int row = 0;row <= h/128;row++)
+    {
+        f_PWF<<<griddim,blockdim>>>(N, N, row);
+        cudaDeviceSynchronize();
+        printf("ok");
+    }
     printf("%d\n", img[1].height);
+    printf("%lu\n", sizeof(size_t));
     cudaDeviceSynchronize();
     // double *a, *b, *d_B, *d_A, *d_C, *c;
     // cudaMalloc((void**)&d_C, sizeof(double)*3*3);
