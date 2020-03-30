@@ -33,14 +33,19 @@ __global__ void CopyData(cuMat out, int row, int col, int pad_row, int pad_col){
 
 __device__ void copyToClutter(cuMat clutter, int row, int col, int pad_row, int pad_col)
 {
+    // pad_row = 7 pad_col = 7
     for(int k=0;k<3;k++)
     {
-        for(int i=0;i<2*pad_row;i++)
+        for(int i=0;i<2*pad_row+1;i++)
         {
-            for(int j = 0;j<2*pad_col;j++)
+            for(int j = 0;j<2*pad_col+1;j++)
             {
-                int temp = i*2*pad_col + j;
-                clutter.meta_data[INDEX(k, temp, clutter.width)] = imgPad[k].meta_data[INDEX(row+i, col+j, imgPad[k].width)];
+                int temp = i*(2*pad_col+1) + j;
+                if(i==(row+pad_row) && j==(col+pad_col))
+                {
+                    continue;
+                }
+                clutter.meta_data[INDEX(k, temp, clutter.width)] = imgPad[k].meta_data[INDEX(row+i, col+j, imgPad[k].pitch/sizeof(cuComplex))];
             }
         }
     }
@@ -50,7 +55,7 @@ __device__ void copyToClutter(cuMat clutter, int row, int col, int pad_row, int 
 __global__ void f_PWF(int pad_row, int pad_col, int num, float T) 
 {
     size_t pointer = 0;
-    int c_row, t_row, t_col, N=900;                // set the pointer 0 && set the sliding window size 30
+    int c_row, t_row, t_col, N=(2*pad_row+1)*(2*pad_col+1) - 1;                // set the pointer 0 && set the sliding window size 30
     cuComplex  data[3], temp[3], result;
     float res;
     c_row = blockIdx.x*gridDim.y + blockIdx.y;
@@ -67,7 +72,7 @@ __global__ void f_PWF(int pad_row, int pad_col, int num, float T)
         sigma_inv = MatInv(sigma_c, ThreadMemPool, pointer);
         for(int i=0;i < 3;i++)
         {
-            data[i] =  img[i].meta_data[INDEX(t_row, t_col, img[i].width)];
+            data[i] =  img[i].meta_data[INDEX(t_row, t_col, img[i].pitch/sizeof(cuComplex))]; // 注意mallocpitch要行对其访问
         }
         for(int i=0;i<3;i++)
         {
@@ -86,11 +91,21 @@ __global__ void f_PWF(int pad_row, int pad_col, int num, float T)
         resImg.data[t_row][t_col] = res>T?255:0;
         // printf("%lu\n", pointer);
         // printf("%f\n", res);
+        if(t_col == 0 && t_row == 0)
+        {
+            // cuComplex det = MatDet(sigma_c, ThreadMemPool, pointer);
+            // printf("%f, %f\n", det.x, det.y);
+            // printf("%f,%f\n", sigma_c.meta_data[0].x, sigma_c.meta_data[0].y);
+            // printf("%f\n", res);
+            // printf("%f,%f\n", data[2].x, data[2].y);
+            // for(int i=0;i<clutter.width;i++)
+            // {
+            //     printf("%f,%f\n", clutter.meta_data[i].x, clutter.meta_data[i].y);
+            // }
+            // printf("%d\n", t_row);
+        }
     }
-   if(t_col == 1)
-    {
-        // printf("%d\n", t_row);
-    }
+
         // printf("%f\n", res);
         // cuMat temp1, temp1_inv;
         // DeviceInitMat(temp1, ThreadMemPool, pointer, 4, 4);
@@ -165,7 +180,7 @@ int main(){
     const char *matfile_VV = "./data/imagery_VV.mat";
     const char *param_VV = "imagery_VV";
     complex<float> *img_mat[3];
-    int h = 1000, w = 1000, N = 15;                               //size of the image data
+    int h = 1000, w = 1000, N = 7;                               //size of the image data
     float Pfa = 0.001; char *resImg_host;
     float T = get_T_PWF(3, Pfa);
     resImg_host = new char[h*w];
@@ -190,9 +205,9 @@ int main(){
       case cudaErrorMemoryAllocation:printf("cudaErrorMemoryAllocation\n");break;
       default:printf("default: %d \n",error_t );break;
     }
-    for(int row = 0;row <= h/256;row++)
+    for(int num = 0;num <= h/256;num++)
     {
-        f_PWF<<<griddim,blockdim>>>(N, N, row, T);
+        f_PWF<<<griddim,blockdim>>>(N, N, num, T);
         cudaDeviceSynchronize();
         printf("ok");
     }
